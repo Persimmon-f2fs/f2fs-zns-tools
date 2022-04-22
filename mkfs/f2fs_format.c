@@ -13,6 +13,8 @@
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <stdbool.h>
 #ifndef ANDROID_WINDOWS_HOST
 #include <sys/stat.h>
 #include <sys/mount.h>
@@ -28,6 +30,10 @@ extern struct f2fs_configuration c;
 struct f2fs_super_block raw_sb;
 struct f2fs_super_block *sb = &raw_sb;
 struct f2fs_checkpoint *cp;
+struct f2fs_mm_info mmi = {
+    .bat_addrs = NULL,
+    .block_information_table = NULL,
+};
 
 /* Return first segment number of each area */
 #define prev_zone(cur)		(c.cur_seg[cur] - c.segs_per_zone)
@@ -35,8 +41,21 @@ struct f2fs_checkpoint *cp;
 #define last_zone(cur)		((cur - 1) * c.segs_per_zone)
 #define last_section(cur)	(cur + (c.secs_per_zone - 1) * c.segs_per_sec)
 
+
+static inline u_int32_t BAT_ENTRY_COUNT()
+{
+    return (get_sb(last_ssa_blkaddr) - get_sb(sit_blkaddr) + 1) / BAT_CHUNK_SIZE;  
+}
+
+static inline u_int32_t BIT_ENTRY_COUNT()
+{
+    return get_sb(section_count_meta);
+}
+
 /* Return time fixed by the user or current time by default */
 #define mkfs_time ((c.fixed_time == -1) ? time(NULL) : c.fixed_time)
+
+static unsigned int quotatype_bits = 0;
 
 const char *media_ext_lists[] = {
 	/* common prefix */
@@ -175,6 +194,44 @@ next:
 	}
 }
 
+static int init_mm_info() 
+{
+    int err = 0;
+
+    mmi.current_secno = get_sb(sit_blkaddr) / (1 << get_sb(log_blocks_per_seg)) / get_sb(segs_per_sec);
+    mmi.current_wp = get_sb(sit_blkaddr);
+    mmi.bat_addrs = calloc(CEILING(BAT_ENTRY_COUNT(), 1024), sizeof(u_int32_t));
+    if (!mmi.bat_addrs) {
+        err = -ENOMEM;
+        goto exit;
+    }
+
+    mmi.block_information_table = calloc(
+            CEILING(BIT_ENTRY_COUNT(), 1024), sizeof(u_int32_t));
+    if (!mmi.block_information_table) {
+        err = -ENOMEM;
+        goto free_bat_addrs;
+    }
+
+    memset(mmi.section_bitmap, 0, SECTION_BITMAP_SIZE * sizeof(u_int32_t));
+
+    return 0;
+
+free_bat_addrs:
+    free(mmi.bat_addrs);
+exit:
+    return err;
+}
+
+static void free_mm_info()
+{
+    if (mmi.bat_addrs)
+        free(mmi.bat_addrs);
+
+    if (mmi.block_information_table)
+        free(mmi.block_information_table);
+}
+
 static void verify_cur_segs(void)
 {
 	int i, j;
@@ -267,7 +324,11 @@ static int f2fs_prepare_super_block(void)
 			(c.devices[0].total_sectors * c.sector_size) % zone_size_bytes;
 
 	set_sb(segment0_blkaddr, zone_align_start_offset / blk_size_bytes);
+
+    MSG(1, "\tsegment0_blkaddr: %u\n", get_sb(segment0_blkaddr));
+
 	sb->cp_blkaddr = sb->segment0_blkaddr;
+
 
 	MSG(0, "Info: zone aligned segment0 blkaddr: %u\n",
 					get_sb(segment0_blkaddr));
@@ -282,6 +343,7 @@ static int f2fs_prepare_super_block(void)
 				get_sb(segment0_blkaddr));
 		return -1;
 	}
+
 
 	for (i = 0; i < c.ndevs; i++) {
 		if (i == 0) {
@@ -313,7 +375,11 @@ static int f2fs_prepare_super_block(void)
 	}
 	set_sb(segment_count, (c.total_segments / c.segs_per_zone *
 						c.segs_per_zone));
-	set_sb(segment_count_ckpt, F2FS_NUMBER_OF_CHECKPOINT_PACK);
+
+    // Samuel Schmidt: allocate two zone's worth of blkaddr for cp
+    // by assigning the next blkaddr to segment0_blkaddr + 2 * sizeof(zone)
+	set_sb(segment_count_ckpt, c.segs_per_sec * 2);
+
 
 	set_sb(sit_blkaddr, get_sb(segment0_blkaddr) +
 			get_sb(segment_count_ckpt) * c.blks_per_seg);
@@ -409,14 +475,31 @@ static int f2fs_prepare_super_block(void)
 
 	set_sb(segment_count_ssa, SEG_ALIGN(blocks_for_ssa));
 
-	total_meta_segments = get_sb(segment_count_ckpt) +
+	total_meta_segments = (get_sb(segment_count_ckpt) +
 		get_sb(segment_count_sit) +
 		get_sb(segment_count_nat) +
-		get_sb(segment_count_ssa);
+		get_sb(segment_count_ssa)) * 2;
+
+    // overprovision
+    total_meta_segments += (total_meta_segments / 20);
+    if (SIZE_ALIGN(total_meta_segments, c.segs_per_sec) == 1) {
+        total_meta_segments += c.segs_per_sec;
+    }
+
 	diff = total_meta_segments % (c.segs_per_zone);
-	if (diff)
+	if (diff) {
 		set_sb(segment_count_ssa, get_sb(segment_count_ssa) +
 			(c.segs_per_zone - diff));
+        total_meta_segments += (c.segs_per_zone - diff);
+    }
+
+    // overprovision meta segments
+
+    set_sb(section_count_meta, total_meta_segments / c.segs_per_sec);
+    printf("section_count_meta: %u\n", get_sb(section_count_meta));
+
+    set_sb(last_ssa_blkaddr,
+            (get_sb(ssa_blkaddr) + get_sb(segment_count_ssa) * c.blks_per_seg) - 1);
 
 	total_meta_zones = ZONE_ALIGN(total_meta_segments *
 						c.blks_per_seg);
@@ -424,6 +507,9 @@ static int f2fs_prepare_super_block(void)
 	set_sb(main_blkaddr, get_sb(segment0_blkaddr) + total_meta_zones *
 				c.segs_per_zone * c.blks_per_seg);
 
+    DBG(1, "\tmain_blkaddr: %u\n", get_sb(main_blkaddr));
+
+#if 0    
 	if (c.zoned_mode) {
 		/*
 		 * Make sure there is enough randomly writeable
@@ -454,6 +540,7 @@ static int f2fs_prepare_super_block(void)
 			}
 		}
 	}
+#endif
 
 	total_zones = get_sb(segment_count) / (c.segs_per_zone) -
 							total_meta_zones;
@@ -509,10 +596,17 @@ static int f2fs_prepare_super_block(void)
 	set_sb(node_ino, 1);
 	set_sb(meta_ino, 2);
 	set_sb(root_ino, 3);
-	c.next_free_nid = 4;
+    set_sb(meta_mapped_ino, 4);
+	c.next_free_nid = 5;
+
+	if (c.feature & cpu_to_le32(F2FS_FEATURE_QUOTA_INO)) {
+		quotatype_bits = QUOTA_USR_BIT | QUOTA_GRP_BIT;
+		if (c.feature & cpu_to_le32(F2FS_FEATURE_PRJQUOTA))
+			quotatype_bits |= QUOTA_PRJ_BIT;
+	}
 
 	for (qtype = 0; qtype < F2FS_MAX_QUOTAS; qtype++) {
-		if (!((1 << qtype) & c.quota_bits))
+		if (!((1 << qtype) & quotatype_bits))
 			continue;
 		sb->qf_ino[qtype] = cpu_to_le32(c.next_free_nid++);
 		MSG(0, "Info: add quota type = %u => %u\n",
@@ -578,10 +672,10 @@ static int f2fs_prepare_super_block(void)
 	if (c.kd >= 0) {
 		dev_read_version(c.version, 0, VERSION_LEN);
 		get_kernel_version(c.version);
+		MSG(0, "Info: format version with\n  \"%s\"\n", c.version);
 	} else {
 		get_kernel_uname_version(c.version);
 	}
-	MSG(0, "Info: format version with\n  \"%s\"\n", c.version);
 
 	memcpy(sb->version, c.version, VERSION_LEN);
 	memcpy(sb->init_version, c.version, VERSION_LEN);
@@ -622,6 +716,9 @@ static int f2fs_init_sit_area(void)
 
 	sit_seg_addr = get_sb(sit_blkaddr);
 	sit_seg_addr *= blk_size;
+
+    // initializing with 0 may not be as necessary because of lazy
+    // loading
 
 	DBG(1, "\tFilling sit area at offset 0x%08"PRIx64"\n", sit_seg_addr);
 	for (index = 0; index < (get_sb(segment_count_sit) / 2); index++) {
@@ -671,6 +768,8 @@ static int f2fs_init_nat_area(void)
 	free(nat_buf);
 	return 0 ;
 }
+
+
 
 static int f2fs_write_check_point_pack(void)
 {
@@ -723,6 +822,11 @@ static int f2fs_write_check_point_pack(void)
 		goto free_nat_bits;
 	}
 
+    set_cp(cur_meta_secno, mmi.current_secno);
+    set_cp(cur_meta_wp, mmi.current_wp);
+
+    printf("cure_meta_secno: %zu\n", get_cp(cur_meta_secno));
+
 	/* 1. cp page 1 of checkpoint pack 1 */
 	srand((c.fake_seed) ? 0 : time(NULL));
 	cp->checkpoint_ver = cpu_to_le64(rand() | 0x1);
@@ -773,11 +877,28 @@ static int f2fs_write_check_point_pack(void)
 			get_cp(overprov_segment_count)) * c.blks_per_seg));
 	}
 	/* cp page (2), data summaries (1), node summaries (3) */
-	set_cp(cp_pack_total_block_count, 6 + get_sb(cp_payload));
+	set_cp(cp_pack_total_block_count, 6 + get_sb(cp_payload)
+            + CEILING(BAT_ENTRY_COUNT(), 1024)
+            + CEILING(BIT_ENTRY_COUNT(), 1024)
+            + 1);
+
+
 	flags = CP_UMOUNT_FLAG | CP_COMPACT_SUM_FLAG;
+
+    // add offsets
+    set_cp(cp_pack_start_meta_bat, 1 + get_sb(cp_payload));
+    set_cp(cp_pack_start_meta_bit, get_cp(cp_pack_start_meta_bat)
+            + CEILING(BAT_ENTRY_COUNT(), 1024));
+    set_cp(cp_pack_start_meta_bitmap, get_cp(cp_pack_start_meta_bit)
+            + CEILING(BIT_ENTRY_COUNT(), 1024));
+
+    printf("cp_pack_start_meta_bat: %lu\n", get_cp(cp_pack_start_meta_bat));
+
+#if 0 // disabling this, unless absolutely necessary
 	if (get_cp(cp_pack_total_block_count) <=
 			(1 << get_sb(log_blocks_per_seg)) - nat_bits_blocks)
 		flags |= CP_NAT_BITS_FLAG;
+#endif
 
 	if (c.trimmed)
 		flags |= CP_TRIMMED_FLAG;
@@ -786,7 +907,13 @@ static int f2fs_write_check_point_pack(void)
 		flags |= CP_LARGE_NAT_BITMAP_FLAG;
 
 	set_cp(ckpt_flags, flags);
-	set_cp(cp_pack_start_sum, 1 + get_sb(cp_payload));
+	set_cp(cp_pack_start_sum, 2 + get_sb(cp_payload) +
+            CEILING(BAT_ENTRY_COUNT(), 1024) +
+            CEILING(BIT_ENTRY_COUNT(), 1024));
+
+    printf("cp_pack_start_sum + seg0_blkaddr: %lu\n",
+            get_sb(segment0_blkaddr) + get_cp(cp_pack_start_sum));
+
 	set_cp(valid_node_count, 1 + c.quota_inum + c.lpf_inum);
 	set_cp(valid_inode_count, 1 + c.quota_inum + c.lpf_inum);
 	set_cp(next_free_nid, c.next_free_nid);
@@ -800,6 +927,8 @@ static int f2fs_write_check_point_pack(void)
 		set_cp(checksum_offset, CP_MIN_CHKSUM_OFFSET);
 	else
 		set_cp(checksum_offset, CP_CHKSUM_OFFSET);
+
+    printf("checksum_offset: %zu\n", get_cp(checksum_offset));
 
 	crc = f2fs_checkpoint_chksum(cp);
 	*((__le32 *)((unsigned char *)cp + get_cp(checksum_offset))) =
@@ -815,8 +944,10 @@ static int f2fs_write_check_point_pack(void)
 
 	cp_seg_blk = get_sb(segment0_blkaddr);
 
-	DBG(1, "\tWriting main segments, cp at offset 0x%08"PRIx64"\n",
+
+	DBG(1, "\tWriting main segments, cp at offset %zu\n",
 						cp_seg_blk);
+    printf("cp_seg_blk: %u\n", cp_seg_blk);
 	if (dev_write_block(cp, cp_seg_blk)) {
 		MSG(1, "\tError: While writing the cp to disk!!!\n");
 		goto free_cp_payload;
@@ -859,7 +990,7 @@ static int f2fs_write_check_point_pack(void)
 			get_cp(cur_node_segno[0]) * c.blks_per_seg);
 
 	for (qtype = 0, i = 1; qtype < F2FS_MAX_QUOTAS; qtype++) {
-		if (!((1 << qtype) & c.quota_bits))
+		if (sb->qf_ino[qtype] == 0)
 			continue;
 		journal->nat_j.entries[i].nid = sb->qf_ino[qtype];
 		journal->nat_j.entries[i].ne.version = 0;
@@ -950,10 +1081,9 @@ static int f2fs_write_check_point_pack(void)
 
 	off = 1;
 	for (qtype = 0; qtype < F2FS_MAX_QUOTAS; qtype++) {
-		int j;
-
-		if (!((1 << qtype) & c.quota_bits))
+		if (sb->qf_ino[qtype] == 0)
 			continue;
+		int j;
 
 		for (j = 0; j < QUOTA_DATA(qtype); j++) {
 			(sum_entry + off + j)->nid = sb->qf_ino[qtype];
@@ -967,11 +1097,37 @@ static int f2fs_write_check_point_pack(void)
 		(sum_entry + off)->ofs_in_node = 0;
 	}
 
+    cp_seg_blk++;
+	DBG(1, "\tWriting bat_addrs, at offset %lu\n", cp_seg_blk);
+
+    for (i = 0; i < BAT_ENTRY_COUNT(); i += 1024) {
+        if (dev_write_block(mmi.bat_addrs + i, cp_seg_blk++)) {
+            MSG(1, "\tError: while writing the mmi.bat_addrs to disk!!!\n");
+            goto free_cp_payload;
+        }
+    }    
+
+
+	DBG(1, "\tWriting block_information_table, at offset 0x%08"PRIx64"\n", cp_seg_blk);
+
+    for (i = 0; i < BIT_ENTRY_COUNT(); i += 1024) {
+        if (dev_write_block(mmi.block_information_table + i, cp_seg_blk++)) {
+            MSG(1, "\tError: while writing the mmi.block_information_table to disk!!!\n");
+            goto free_cp_payload;
+        }
+    }
+
+	DBG(1, "\tWriting section_bitmap, at offset 0x%08"PRIx64"\n", cp_seg_blk);
+    if (dev_write(mmi.section_bitmap, cp_seg_blk << F2FS_BLKSIZE_BITS, SECTION_BITMAP_SIZE)) {
+        MSG(1, "\tError: while writing mmi.section_bitmap to disk!!!\n");
+        goto free_cp_payload;
+    } 
+
 	/* warm data summary, nothing to do */
 	/* cold data summary, nothing to do */
 
 	cp_seg_blk++;
-	DBG(1, "\tWriting Segment summary for HOT/WARM/COLD_DATA, at offset 0x%08"PRIx64"\n",
+	DBG(1, "\tWriting Segment summary for HOT/WARM/COLD_DATA, at offset %zu\n",
 			cp_seg_blk);
 	if (dev_write_block(sum_compact, cp_seg_blk)) {
 		MSG(1, "\tError: While writing the sum_blk to disk!!!\n");
@@ -985,7 +1141,7 @@ static int f2fs_write_check_point_pack(void)
 	sum->entries[0].nid = sb->root_ino;
 	sum->entries[0].ofs_in_node = 0;
 	for (qtype = i = 0; qtype < F2FS_MAX_QUOTAS; qtype++) {
-		if (!((1 << qtype) & c.quota_bits))
+		if (sb->qf_ino[qtype] == 0)
 			continue;
 		sum->entries[1 + i].nid = sb->qf_ino[qtype];
 		sum->entries[1 + i].ofs_in_node = 0;
@@ -1036,6 +1192,8 @@ static int f2fs_write_check_point_pack(void)
 		goto free_cp_payload;
 	}
 
+    printf("cp_seg_blk - total_block_count %zu\n", cp_seg_blk - get_cp(cp_pack_total_block_count));
+
 	/* write NAT bits, if possible */
 	if (flags & CP_NAT_BITS_FLAG) {
 		uint32_t i;
@@ -1061,6 +1219,8 @@ static int f2fs_write_check_point_pack(void)
 		}
 	}
 
+    return 0;
+
 	/* cp page 1 of check point pack 2
 	 * Initialize other checkpoint pack with version zero
 	 */
@@ -1069,7 +1229,7 @@ static int f2fs_write_check_point_pack(void)
 	crc = f2fs_checkpoint_chksum(cp);
 	*((__le32 *)((unsigned char *)cp + get_cp(checksum_offset))) =
 							cpu_to_le32(crc);
-	cp_seg_blk = get_sb(segment0_blkaddr) + c.blks_per_seg;
+	cp_seg_blk = get_sb(segment0_blkaddr) + (c.blks_per_seg * c.segs_per_sec);
 	DBG(1, "\tWriting cp page 1 of checkpoint pack 2, at offset 0x%08"PRIx64"\n",
 				cp_seg_blk);
 	if (dev_write_block(cp, cp_seg_blk)) {
@@ -1085,6 +1245,7 @@ static int f2fs_write_check_point_pack(void)
 			goto free_cp_payload;
 		}
 	}
+
 
 	/* cp page 2 of check point pack 2 */
 	cp_seg_blk += (le32_to_cpu(cp->cp_pack_total_block_count) -
@@ -1268,7 +1429,9 @@ static int f2fs_write_root_inode(void)
 	main_area_node_seg_blk_offset += c.cur_seg[CURSEG_HOT_NODE] *
 					c.blks_per_seg;
 
-	DBG(1, "\tWriting root inode (hot node), %x %x %x at offset 0x%08"PRIu64"\n",
+    DBG(1, "\tc.cur_seg[CURSEG_HOT_NODE]: %u\n", c.cur_seg[CURSEG_HOT_NODE]);
+
+	DBG(1, "\tWriting root inode (hot node), %u %x %x at offset 0x%08"PRIu64"\n",
 			get_sb(main_blkaddr),
 			c.cur_seg[CURSEG_HOT_NODE],
 			c.blks_per_seg, main_area_node_seg_blk_offset);
@@ -1353,7 +1516,7 @@ static int f2fs_write_default_quota(int qtype, unsigned int blkaddr,
 	return 0;
 }
 
-static int f2fs_write_qf_inode(int qtype, int offset)
+static int f2fs_write_qf_inode(int qtype)
 {
 	struct f2fs_node *raw_node = NULL;
 	u_int64_t data_blk_nor;
@@ -1375,9 +1538,11 @@ static int f2fs_write_qf_inode(int qtype, int offset)
 	raw_node->i.i_blocks = cpu_to_le64(1 + QUOTA_DATA(qtype));
 
 	data_blk_nor = get_sb(main_blkaddr) +
-		c.cur_seg[CURSEG_HOT_DATA] * c.blks_per_seg + 1
-		+ offset * QUOTA_DATA(i);
+		c.cur_seg[CURSEG_HOT_DATA] * c.blks_per_seg + 1;
 
+	for (i = 0; i < qtype; i++)
+		if (sb->qf_ino[i])
+			data_blk_nor += QUOTA_DATA(i);
 	if (qtype == 0)
 		raw_id = raw_node->i.i_uid;
 	else if (qtype == 1)
@@ -1399,7 +1564,7 @@ static int f2fs_write_qf_inode(int qtype, int offset)
 
 	main_area_node_seg_blk_offset = get_sb(main_blkaddr);
 	main_area_node_seg_blk_offset += c.cur_seg[CURSEG_HOT_NODE] *
-					c.blks_per_seg + offset + 1;
+					c.blks_per_seg + qtype + 1;
 
 	DBG(1, "\tWriting quota inode (hot node), %x %x %x at offset 0x%08"PRIu64"\n",
 			get_sb(main_blkaddr),
@@ -1419,19 +1584,28 @@ static int f2fs_write_qf_inode(int qtype, int offset)
 static int f2fs_update_nat_root(void)
 {
 	struct f2fs_nat_block *nat_blk = NULL;
-	u_int64_t nat_seg_blk_offset = 0;
+    struct f2fs_meta_block *meta_blk = NULL;
+	u_int64_t nat_seg_blk_offset = 0, nat_seg_blk_idx = 0;
 	enum quota_type qtype;
-	int i;
+	int i, err = 0;
 
 	nat_blk = calloc(F2FS_BLKSIZE, 1);
 	if(nat_blk == NULL) {
 		MSG(1, "\tError: Calloc Failed for nat_blk!!!\n");
-		return -1;
+        err = -1;
+        goto exit;
 	}
+
+    meta_blk = calloc(F2FS_BLKSIZE, 1);
+    if (meta_blk == NULL) {
+		MSG(1, "\tError: Calloc Failed for meta_blk!!!\n");
+        err = -1;
+        goto free_nat_blk;
+    }
 
 	/* update quota */
 	for (qtype = i = 0; qtype < F2FS_MAX_QUOTAS; qtype++) {
-		if (!((1 << qtype) & c.quota_bits))
+		if (sb->qf_ino[qtype] == 0)
 			continue;
 		nat_blk->entries[sb->qf_ino[qtype]].block_addr =
 				cpu_to_le32(get_sb(main_blkaddr) +
@@ -1445,6 +1619,10 @@ static int f2fs_update_nat_root(void)
 	nat_blk->entries[get_sb(root_ino)].block_addr = cpu_to_le32(
 		get_sb(main_blkaddr) +
 		c.cur_seg[CURSEG_HOT_NODE] * c.blks_per_seg);
+
+    printf("nat_blk->entries[get_sb(root_ino)].block_addr = (%lu)\n",
+            le32_to_cpu(nat_blk->entries[get_sb(root_ino)].block_addr));
+
 	nat_blk->entries[get_sb(root_ino)].ino = sb->root_ino;
 
 	/* update node nat */
@@ -1457,16 +1635,46 @@ static int f2fs_update_nat_root(void)
 
 	nat_seg_blk_offset = get_sb(nat_blkaddr);
 
-	DBG(1, "\tWriting nat root, at offset 0x%08"PRIx64"\n",
+	DBG(1, "\tWriting nat root, at offset %zu\n",
 					nat_seg_blk_offset);
-	if (dev_write_block(nat_blk, nat_seg_blk_offset)) {
+    // TODO: Replace the dev_write_block logic with chunked layer of indirection
+    
+    nat_seg_blk_idx = nat_seg_blk_offset - get_sb(sit_blkaddr);
+
+    meta_blk->is_gc_end = false;
+    meta_blk->lba = cpu_to_le32(nat_seg_blk_offset);
+    meta_blk->prev_zone_id = cpu_to_le32(0);
+    meta_blk->invalid_count = cpu_to_le32(0);
+    meta_blk->bat_chunk[nat_seg_blk_idx % BAT_CHUNK_SIZE] = cpu_to_le32(mmi.current_wp);
+    meta_blk->section_bitmap[0] |= 1; // mark 0th segment as nonempty
+
+    // metadata placed adjacent to data
+
+    printf("current_wp: %lu\n", mmi.current_wp);
+
+    mmi.bat_addrs[nat_seg_blk_idx / BAT_CHUNK_SIZE] = mmi.current_wp + 1;
+    mmi.section_bitmap[0] |= 1;
+
+    printf("nat_seg_blk_idx / BAT_CHUNK_SIZE: %lu\n",
+            nat_seg_blk_idx / BAT_CHUNK_SIZE);
+
+	if (dev_write_block(nat_blk, mmi.current_wp++)) {
 		MSG(1, "\tError: While writing the nat_blk set0 to disk!\n");
-		free(nat_blk);
-		return -1;
+        err = -1;
+        goto free_meta_blk;
 	}
 
+    if (dev_write_block(meta_blk, mmi.current_wp++)) {
+		MSG(1, "\tError: While writing the meta_blk set0 to disk!\n");
+        err = -1;
+    }
+
+free_meta_blk:
+    free(meta_blk);
+free_nat_blk:
 	free(nat_blk);
-	return 0;
+exit:
+	return err;
 }
 
 static block_t f2fs_add_default_dentry_lpf(void)
@@ -1669,7 +1877,7 @@ static int f2fs_add_default_dentry_root(void)
 static int f2fs_create_root_dir(void)
 {
 	enum quota_type qtype;
-	int err = 0, i = 0;
+	int err = 0;
 
 	err = f2fs_write_root_inode();
 	if (err < 0) {
@@ -1678,9 +1886,9 @@ static int f2fs_create_root_dir(void)
 	}
 
 	for (qtype = 0; qtype < F2FS_MAX_QUOTAS; qtype++)  {
-		if (!((1 << qtype) & c.quota_bits))
+		if (sb->qf_ino[qtype] == 0)
 			continue;
-		err = f2fs_write_qf_inode(qtype, i++);
+		err = f2fs_write_qf_inode(qtype);
 		if (err < 0) {
 			MSG(1, "\tError: Failed to write quota inode!!!\n");
 			goto exit;
@@ -1714,6 +1922,7 @@ static int f2fs_create_root_dir(void)
 		MSG(1, "\tError: Failed to add default dentries for root!!!\n");
 		goto exit;
 	}
+
 exit:
 	if (err)
 		MSG(1, "\tError: Could not create the root directory!!!\n");
@@ -1721,17 +1930,43 @@ exit:
 	return err;
 }
 
+
+void dump_super(void)
+{
+    printf("segment0_blkaddr: %lu\n", get_sb(segment0_blkaddr));
+    printf("section_count_ckpt: %lu\n", get_sb(segment_count_ckpt) / get_sb(segs_per_sec));
+    printf("sit_blkaddr: %lu\n", get_sb(sit_blkaddr));
+    printf("current-secno: %lu\n", mmi.current_secno);
+    printf("current-wp / blocks_per_seg: %lu\n", mmi.current_wp >> get_sb(log_blocks_per_seg));
+    printf("current-wp: %lu\n", mmi.current_wp);
+}
+
 int f2fs_format_device(void)
 {
 	int err = 0;
 
-	err= f2fs_prepare_super_block();
+    printf("sizeof(struct f2fs_super_block): %u\n", sizeof(struct f2fs_super_block));
+
+    err = f2fs_reset_zones(0);
+    if (err) {
+        MSG(0, "Could not reset device\n");
+        goto exit;
+    }
+
+	err = f2fs_prepare_super_block();
 	if (err < 0) {
 		MSG(0, "\tError: Failed to prepare a super block!!!\n");
 		goto exit;
 	}
 
+    err = init_mm_info();
+    if (err < 0) {
+		MSG(0, "\tError: Failed to prepare mm_info!!!\n");
+        goto exit;
+    }
+
 	if (c.trim) {
+        puts("trimming devices");
 		err = f2fs_trim_devices();
 		if (err < 0) {
 			MSG(0, "\tError: Failed to trim whole device!!!\n");
@@ -1739,6 +1974,7 @@ int f2fs_format_device(void)
 		}
 	}
 
+#if 0
 	err = f2fs_init_sit_area();
 	if (err < 0) {
 		MSG(0, "\tError: Failed to initialise the SIT AREA!!!\n");
@@ -1750,6 +1986,7 @@ int f2fs_format_device(void)
 		MSG(0, "\tError: Failed to initialise the NAT AREA!!!\n");
 		goto exit;
 	}
+#endif
 
 	err = f2fs_create_root_dir();
 	if (err < 0) {
@@ -1762,15 +1999,22 @@ int f2fs_format_device(void)
 		MSG(0, "\tError: Failed to write the check point pack!!!\n");
 		goto exit;
 	}
+#if 0
+#endif
 
 	err = f2fs_write_super_block();
 	if (err < 0) {
 		MSG(0, "\tError: Failed to write the super block!!!\n");
 		goto exit;
 	}
+
+    dump_super();
+
 exit:
 	if (err)
 		MSG(0, "\tError: Could not format the device!!!\n");
+    
+    free_mm_info();
 
 	return err;
 }

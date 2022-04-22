@@ -71,6 +71,7 @@
 #ifdef ANDROID_WINDOWS_HOST
 #undef HAVE_LINUX_TYPES_H
 typedef uint64_t u_int64_t;
+
 typedef uint32_t u_int32_t;
 typedef uint16_t u_int16_t;
 typedef uint8_t u_int8_t;
@@ -79,6 +80,7 @@ typedef uint8_t u_int8_t;
 /* codes from kernel's f2fs.h, GPL-v2.0 */
 #define MIN_COMPRESS_LOG_SIZE	2
 #define MAX_COMPRESS_LOG_SIZE	8
+#define CEILING(x,y) (((x) + (y) - 1) / (y))
 
 typedef u_int64_t	u64;
 typedef u_int32_t	u32;
@@ -507,7 +509,6 @@ struct f2fs_configuration {
 	int large_nat_bitmap;
 	int fix_chksum;			/* fix old cp.chksum position */
 	__le32 feature;			/* defined features */
-	unsigned int quota_bits;	/* quota bits */
 	time_t fixed_time;
 
 	/* mkfs parameters */
@@ -676,13 +677,13 @@ enum {
 /*
  * Copied from include/linux/f2fs_sb.h
  */
-#define F2FS_SUPER_OFFSET		1024	/* byte-size offset */
 #define F2FS_MIN_LOG_SECTOR_SIZE	9	/* 9 bits for 512 bytes */
 #define F2FS_MAX_LOG_SECTOR_SIZE	12	/* 12 bits for 4096 bytes */
 #define F2FS_BLKSIZE			4096	/* support only 4KB block */
 #define F2FS_MAX_EXTENSION		64	/* # of extension entries */
 #define F2FS_EXTENSION_LEN		8	/* max size of extension */
 #define F2FS_BLK_ALIGN(x)	(((x) + F2FS_BLKSIZE - 1) / F2FS_BLKSIZE)
+#define F2FS_SUPER_OFFSET	(F2FS_BLKSIZE - sizeof(struct f2fs_super_block))	/* byte-size offset */
 
 #define NULL_ADDR		0x0U
 #define NEW_ADDR		-1U
@@ -755,6 +756,7 @@ struct f2fs_super_block {
 	__le64 block_count;		/* total # of user blocks */
 	__le32 section_count;		/* total # of sections */
 	__le32 segment_count;		/* total # of segments */
+    __le32 section_count_meta;
 	__le32 segment_count_ckpt;	/* # of segments for checkpoint */
 	__le32 segment_count_sit;	/* # of segments for SIT */
 	__le32 segment_count_nat;	/* # of segments for NAT */
@@ -765,10 +767,12 @@ struct f2fs_super_block {
 	__le32 sit_blkaddr;		/* start block address of SIT */
 	__le32 nat_blkaddr;		/* start block address of NAT */
 	__le32 ssa_blkaddr;		/* start block address of SSA */
+    __le32 last_ssa_blkaddr;
 	__le32 main_blkaddr;		/* start block address of main area */
 	__le32 root_ino;		/* root inode number */
 	__le32 node_ino;		/* node inode number */
 	__le32 meta_ino;		/* meta inode number */
+    __le32 meta_mapped_ino; /* meta mapped inode */
 	__u8 uuid[16];			/* 128-bit uuid for volume */
 	__le16 volume_name[MAX_VOLUME_NAME];	/* volume name */
 	__le32 extension_count;		/* # of extensions below */
@@ -822,8 +826,14 @@ struct f2fs_checkpoint {
 	/* information of current data segments */
 	__le32 cur_data_segno[MAX_ACTIVE_DATA_LOGS];
 	__le16 cur_data_blkoff[MAX_ACTIVE_DATA_LOGS];
-	__le32 ckpt_flags;		/* Flags : umount and journal_present */
+    /* information of current meta segments */
+    __le32 cur_meta_secno;
+    __le32 cur_meta_wp;
+    __le32 ckpt_flags;		/* Flags : umount and journal_present */
 	__le32 cp_pack_total_block_count;	/* total # of one cp pack */
+    __le32 cp_pack_start_meta_bat; /* bat block inside cp pack */
+    __le32 cp_pack_start_meta_bit; /* bit block inside cp pack */
+    __le32 cp_pack_start_meta_bitmap; /* bitmap block inside cp pack */
 	__le32 cp_pack_start_sum;	/* start block number of data summary */
 	__le32 valid_node_count;	/* Total number of valid nodes */
 	__le32 valid_inode_count;	/* Total number of valid inodes */
@@ -871,6 +881,29 @@ struct f2fs_extent {
 	__le32 blk_addr;	/* start block address of the extent */
 	__le32 len;		/* lengh of the extent */
 } __attribute__((packed));
+
+#define BAT_CHUNK_SIZE 1010
+#define SECTION_BITMAP_SIZE 10
+
+// in memory meta representation
+struct f2fs_mm_info {
+    u_int32_t current_secno;
+    u_int32_t current_wp;
+    u_int32_t *bat_addrs;
+    u_int32_t *block_information_table;
+    u_int32_t section_bitmap[SECTION_BITMAP_SIZE];
+};
+
+
+struct f2fs_meta_block {
+    bool is_gc_end;
+    __le32 lba;
+    __le32 prev_zone_id;
+    __le32 invalid_count;
+    __le32 section_bitmap[SECTION_BITMAP_SIZE];
+    __le32 bat_chunk[BAT_CHUNK_SIZE];
+} __attribute__((packed));
+
 
 #define F2FS_NAME_LEN		255
 

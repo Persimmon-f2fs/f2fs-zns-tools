@@ -12,7 +12,6 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <string.h>
-#include <stdbool.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #ifndef ANDROID_WINDOWS_HOST
@@ -25,16 +24,12 @@
 
 #include "config.h"
 #ifdef HAVE_LIBBLKID
-#include <blkid.h>
+#  include <blkid.h>
 #endif
 
 #include "f2fs_fs.h"
-#include "quota.h"
 #include "f2fs_format_utils.h"
 
-#ifdef HAVE_SYS_UTSNAME_H
-#include <sys/utsname.h>
-#endif
 #ifdef WITH_ANDROID
 #include <sparse/sparse.h>
 extern struct sparse_file *f2fs_sparse_file;
@@ -79,7 +74,7 @@ static void mkfs_usage()
 
 static void f2fs_show_info()
 {
-	MSG(0, "\n    F2FS-tools: mkfs.f2fs Ver: %s (%s)\n\n",
+	MSG(0, "\n\tF2FS-tools: mkfs.f2fs Ver: %s (%s)\n\n",
 				F2FS_TOOLS_VERSION,
 				F2FS_TOOLS_DATE);
 	if (c.heap == 0)
@@ -108,34 +103,11 @@ static void f2fs_show_info()
 		MSG(0, "Info: Enable Compression\n");
 }
 
-#if defined(ANDROID_TARGET) && defined(HAVE_SYS_UTSNAME_H)
-static bool kernel_version_over(unsigned int min_major, unsigned int min_minor)
-{
-	unsigned int major, minor;
-	struct utsname uts;
-
-	if ((uname(&uts) != 0) ||
-			(sscanf(uts.release, "%u.%u", &major, &minor) != 2))
-		return false;
-	if (major > min_major)
-		return true;
-	if (major == min_major && minor >= min_minor)
-		return true;
-	return false;
-}
-#else
-static bool kernel_version_over(unsigned int UNUSED(min_major),
-				unsigned int UNUSED(min_minor))
-{
-	return false;
-}
-#endif
-
 static void add_default_options(void)
 {
 	switch (c.defset) {
 	case CONF_ANDROID:
-		/* -d1 -f -w 4096 -R 0:0 */
+		/* -d1 -f -O encrypt -O quota -O verity -w 4096 -R 0:0 */
 		c.dbg_lv = 1;
 		force_overwrite = 1;
 		c.wanted_sector_size = 4096;
@@ -145,12 +117,8 @@ static void add_default_options(void)
 		if (c.feature & cpu_to_le32(F2FS_FEATURE_RO))
 			return;
 
-		/* -O encrypt -O project_quota,extra_attr,{quota} -O verity */
 		c.feature |= cpu_to_le32(F2FS_FEATURE_ENCRYPT);
-		if (!kernel_version_over(4, 14))
-			c.feature |= cpu_to_le32(F2FS_FEATURE_QUOTA_INO);
-		c.feature |= cpu_to_le32(F2FS_FEATURE_PRJQUOTA);
-		c.feature |= cpu_to_le32(F2FS_FEATURE_EXTRA_ATTR);
+		c.feature |= cpu_to_le32(F2FS_FEATURE_QUOTA_INO);
 		c.feature |= cpu_to_le32(F2FS_FEATURE_VERITY);
 		break;
 	}
@@ -159,17 +127,10 @@ static void add_default_options(void)
 	c.feature |= cpu_to_le32(F2FS_FEATURE_CASEFOLD);
 #endif
 #ifdef CONF_PROJID
-	c.feature |= cpu_to_le32(F2FS_FEATURE_QUOTA_INO);
 	c.feature |= cpu_to_le32(F2FS_FEATURE_PRJQUOTA);
 	c.feature |= cpu_to_le32(F2FS_FEATURE_EXTRA_ATTR);
 #endif
-
-	if (c.feature & cpu_to_le32(F2FS_FEATURE_QUOTA_INO))
-		c.quota_bits = QUOTA_USR_BIT | QUOTA_GRP_BIT;
-	if (c.feature & cpu_to_le32(F2FS_FEATURE_PRJQUOTA)) {
-		c.feature |= cpu_to_le32(F2FS_FEATURE_QUOTA_INO);
-		c.quota_bits |= QUOTA_PRJ_BIT;
-	}
+    c.zoned_mode = 1;
 }
 
 static void f2fs_parse_options(int argc, char *argv[])
@@ -434,6 +395,8 @@ int main(int argc, char *argv[])
 
 	f2fs_show_info();
 
+    printf("sizeof(ckpt): %zu\n", sizeof(struct f2fs_checkpoint));
+
 	c.func = MKFS;
 
 	if (f2fs_devs_are_umounted() < 0) {
@@ -448,6 +411,8 @@ int main(int argc, char *argv[])
 	if (f2fs_check_overwrite()) {
 		char *zero_buf = NULL;
 		int i;
+
+        printf("\nChecking overwrite\n");
 
 		if (!force_overwrite) {
 			MSG(0, "\tUse the -f option to force overwrite.\n");
@@ -469,7 +434,9 @@ int main(int argc, char *argv[])
 		}
 		if (f2fs_fsync_device())
 			goto err_format;
-	}
+	} else {
+        printf("\nNot Checking overwrite\n");
+    }
 
 	if (f2fs_get_f2fs_info() < 0)
 		goto err_format;
@@ -478,10 +445,12 @@ int main(int argc, char *argv[])
 	 * Some options are mandatory for host-managed
 	 * zoned block devices.
 	 */
+#if 0
 	if (c.zoned_model == F2FS_ZONED_HM && !c.zoned_mode) {
 		MSG(0, "\tError: zoned block device feature is required\n");
 		goto err_format;
 	}
+#endif
 
 	if (c.zoned_mode && !c.trim) {
 		MSG(0, "\tError: Trim is required for zoned block devices\n");

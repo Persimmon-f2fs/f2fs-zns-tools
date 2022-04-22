@@ -389,17 +389,18 @@ int f2fs_check_zones(int j)
 	}
 
 	/*
+     * Disable this check in order to support zoned devices for metadata
 	 * For a multi-device volume, fixed position metadata blocks are
 	 * stored * only on the first device of the volume. Checking for the
 	 * presence of * conventional zones (randomly writeabl zones) for
 	 * storing these blocks * on a host-managed device is thus needed only
 	 * for the device index 0.
 	 */
-	if (j == 0 && dev->zoned_model == F2FS_ZONED_HM &&
-			!dev->nr_rnd_zones) {
-		ERR_MSG("No conventional zone for super block\n");
-		ret = -1;
-	}
+	// if (j == 0 && dev->zoned_model == F2FS_ZONED_HM &&
+			// !dev->nr_rnd_zones) {
+		// ERR_MSG("No conventional zone for super block\n");
+		// ret = -1;
+	// }
 out:
 	free(rep);
 	return ret;
@@ -437,6 +438,8 @@ int f2fs_reset_zones(int j)
 	u_int64_t sector;
 	unsigned int i;
 	int ret = -1;
+
+    printf("We can reset zones!\n");
 
 	rep = malloc(F2FS_REPORT_ZONES_BUFSZ);
 	if (!rep) {

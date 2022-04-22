@@ -952,7 +952,7 @@ int get_device_info(int i)
 		c.kd = open("/proc/version", O_RDONLY);
 #endif
 		if (c.kd < 0) {
-			MSG(0, "Info: not exist /proc/version!\n");
+			MSG(0, "\tInfo: No support kernel version!\n");
 			c.kd = -2;
 		}
 	}
@@ -1249,6 +1249,9 @@ int f2fs_get_f2fs_info(void)
 		 * BLKZONED feature set at format time, this is only an
 		 * optimization as sequential writes will not be enforced.
 		 */
+
+        MSG(0, "Aligning sections to zone sizes\n");
+
 		c.segs_per_sec = c.zone_blocks / DEFAULT_BLOCKS_PER_SEGMENT;
 		c.secs_per_zone = 1;
 	} else {

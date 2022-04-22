@@ -550,6 +550,7 @@ int dev_readahead(__u64 offset, size_t UNUSED(len))
 int dev_write(void *buf, __u64 offset, size_t len)
 {
 	int fd;
+    ssize_t w_amt;
 
 	if (c.max_size < (offset + len))
 		c.max_size = offset + len;
@@ -565,6 +566,8 @@ int dev_write(void *buf, __u64 offset, size_t len)
 	if (fd < 0)
 		return fd;
 
+    DBG(1, "\twrite offset: %u\n", offset);
+
 	/*
 	 * dcache_update_cache() just update cache, won't do I/O.
 	 * Thus even no error, we need normal non-cache I/O for actual write
@@ -573,14 +576,19 @@ int dev_write(void *buf, __u64 offset, size_t len)
 		return -1;
 	if (lseek64(fd, (off64_t)offset, SEEK_SET) < 0)
 		return -1;
-	if (write(fd, buf, len) < 0)
+	if ((w_amt = write(fd, buf, len)) < 0)
 		return -1;
+
+    DBG(1, "\twrote: %u\n", w_amt);
+
 	return 0;
 }
 
 int dev_write_block(void *buf, __u64 blk_addr)
 {
-	return dev_write(buf, blk_addr << F2FS_BLKSIZE_BITS, F2FS_BLKSIZE);
+    __u64 sector = blk_addr << F2FS_BLKSIZE_BITS;
+
+	return dev_write(buf, sector, F2FS_BLKSIZE);
 }
 
 int dev_write_dump(void *buf, __u64 offset, size_t len)
@@ -614,6 +622,7 @@ int dev_fill(void *buf, __u64 offset, size_t len)
 		return -1;
 	if (write(fd, buf, len) < 0)
 		return -1;
+
 	return 0;
 }
 
@@ -787,6 +796,7 @@ int f2fs_finalize_device(void)
 		ret = fsync(c.devices[i].fd);
 		if (ret < 0) {
 			MSG(0, "\tError: Could not conduct fsync!!!\n");
+            warn("Could not conduct fsync!!");
 			break;
 		}
 #endif
