@@ -755,8 +755,8 @@ struct f2fs_super_block {
 	__le32 checksum_offset;		/* checksum offset inside super block */
 	__le64 block_count;		/* total # of user blocks */
 	__le32 section_count;		/* total # of sections */
-	__le32 segment_count;		/* total # of segments */
     __le32 section_count_meta;
+	__le32 segment_count;		/* total # of segments */
 	__le32 segment_count_ckpt;	/* # of segments for checkpoint */
 	__le32 segment_count_sit;	/* # of segments for SIT */
 	__le32 segment_count_nat;	/* # of segments for NAT */
