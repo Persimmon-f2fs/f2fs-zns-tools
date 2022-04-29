@@ -40,11 +40,13 @@ struct f2fs_mm_info mmi = {
 #define next_zone(cur)		(c.cur_seg[cur] + c.segs_per_zone)
 #define last_zone(cur)		((cur - 1) * c.segs_per_zone)
 #define last_section(cur)	(cur + (c.secs_per_zone - 1) * c.segs_per_sec)
+#define CEILING(x,y) (((x) + (y) - 1) / (y))
 
 
 static inline u_int32_t BAT_ENTRY_COUNT()
 {
-    return (get_sb(last_ssa_blkaddr) - get_sb(sit_blkaddr) + 1) / BAT_CHUNK_SIZE;  
+    return CEILING(get_sb(last_ssa_blkaddr) - get_sb(sit_blkaddr) + 1,
+           BAT_CHUNK_SIZE);  
 }
 
 static inline u_int32_t BIT_ENTRY_COUNT()
@@ -128,6 +130,17 @@ const char **default_ext_list[] = {
 	hot_ext_lists
 };
 
+static void dump_bat() {
+    size_t i = 0;
+    printf("starting bat dump\n");
+    for (i = 0; i < BAT_ENTRY_COUNT(); ++i) {
+       if (mmi.bat_addrs[i] != 0) {
+           printf("mmi.bar_addrs[%zu] = %u\n", i, mmi.bat_addrs[i]);
+       } 
+    }
+    printf("did bat dump\n");
+}
+
 static bool is_extension_exist(const char *name)
 {
 	int i;
@@ -200,7 +213,8 @@ static int init_mm_info()
 
     mmi.current_secno = get_sb(sit_blkaddr) / (1 << get_sb(log_blocks_per_seg)) / get_sb(segs_per_sec);
     mmi.current_wp = get_sb(sit_blkaddr);
-    mmi.bat_addrs = calloc(CEILING(BAT_ENTRY_COUNT(), 1024), sizeof(u_int32_t));
+    mmi.bat_addrs = calloc(BAT_ENTRY_COUNT(), sizeof(u_int32_t));
+    memset(mmi.bat_addrs, 0, BAT_ENTRY_COUNT() * sizeof(u_int32_t));
     if (!mmi.bat_addrs) {
         err = -ENOMEM;
         goto exit;
@@ -788,6 +802,8 @@ static int f2fs_write_check_point_pack(void)
 	int off;
 	int ret = -1;
 
+    dump_bat();
+
 	cp = calloc(F2FS_BLKSIZE, 1);
 	if (cp == NULL) {
 		MSG(1, "\tError: Calloc failed for f2fs_checkpoint!!!\n");
@@ -1099,6 +1115,8 @@ static int f2fs_write_check_point_pack(void)
 
     cp_seg_blk++;
 	DBG(1, "\tWriting bat_addrs, at offset %lu\n", cp_seg_blk);
+
+    printf("\nBAT_ENTRY_COUNT: (%u)\n\n", BAT_ENTRY_COUNT());
 
     for (i = 0; i < BAT_ENTRY_COUNT(); i += 1024) {
         if (dev_write_block(mmi.bat_addrs + i, cp_seg_blk++)) {
@@ -1941,23 +1959,61 @@ void dump_super(void)
     printf("current-wp: %lu\n", mmi.current_wp);
 }
 
+int init_meta()
+{
+    int err = 0;
+    size_t cur_blk = 0;
+    char *zero_block = NULL;
+
+    zero_block = malloc(F2FS_BLKSIZE);
+    memset(zero_block, 0, F2FS_BLKSIZE);
+    
+    err = f2fs_reset_zones(0);
+    if (err)
+        goto out;
+
+#if 0
+    for (cur_blk = get_sb(sit_blkaddr); cur_blk < get_sb(main_blkaddr); ++cur_blk) {
+        printf("wrote: %u\n", cur_blk);
+        err = dev_write_block(zero_block, cur_blk);
+        if (err)
+            goto out;
+
+        err = fsync(c.devices[0].fd);
+        if (err) {
+            MSG(0, "\tError: Could not conduct fsync!!!\n");
+            goto out;
+        }
+    }
+
+        
+
+    err = f2fs_reset_zones(0);
+    if (err)
+        goto out;
+#endif
+
+out:
+    return err;
+}
+
 int f2fs_format_device(void)
 {
 	int err = 0;
 
     printf("sizeof(struct f2fs_super_block): %u\n", sizeof(struct f2fs_super_block));
 
-    err = f2fs_reset_zones(0);
-    if (err) {
-        MSG(0, "Could not reset device\n");
-        goto exit;
-    }
-
 	err = f2fs_prepare_super_block();
 	if (err < 0) {
 		MSG(0, "\tError: Failed to prepare a super block!!!\n");
 		goto exit;
 	}
+
+    err = init_meta();
+    if (err) {
+        MSG(0, "Could not reset device\n");
+        goto exit;
+    }
 
     err = init_mm_info();
     if (err < 0) {
@@ -1987,6 +2043,7 @@ int f2fs_format_device(void)
 		goto exit;
 	}
 #endif
+    dump_bat();
 
 	err = f2fs_create_root_dir();
 	if (err < 0) {
