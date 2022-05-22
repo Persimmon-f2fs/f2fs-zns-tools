@@ -1158,6 +1158,31 @@ static void do_compress(int argc, char **argv, const struct cmd_desc *cmd)
 	exit(0);
 }
 
+#define get_gc_stats_desc "get stats about gc"
+#define get_gc_stats_help \
+    "f2fs_io get_gc_stats <mount  point>\n\n"
+static void do_get_gc_stats(int argc, char **argv, const struct cmd_desc *cmd)
+{
+    struct f2fs_gc_stats stats;
+    int ret, fd;
+
+	if (argc != 2) {
+		fputs("Excess arguments\n\n", stderr);
+		fputs(cmd->cmd_help, stderr);
+		exit(1);
+	}
+
+	fd = xopen(argv[1], O_RDONLY, 0);
+
+	ret = ioctl(fd, F2FS_IOC_GET_GC_STATS, &stats);
+	if (ret < 0)
+		die_errno("F2FS_IOC_GET_GC_STATS failed");
+
+    printf("Number of blocks migrated: %lu\n", stats.blocks_migrated);
+
+    exit(0);
+}
+
 #define get_filename_encrypt_mode_desc "get file name encrypt mode"
 #define get_filename_encrypt_mode_help					\
 "f2fs_io filename_encrypt_mode [file or directory path]\n\n"		\
@@ -1286,6 +1311,7 @@ const struct cmd_desc cmd_list[] = {
 	CMD(compress),
 	CMD(get_filename_encrypt_mode),
 	CMD(rename),
+    CMD(get_gc_stats),
 	{ NULL, NULL, NULL, NULL, 0 }
 };
 

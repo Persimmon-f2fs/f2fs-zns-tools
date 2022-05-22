@@ -7,8 +7,7 @@
 #include <sys/types.h>
 #include <sys/ioctl.h>
 
-#ifdef HAVE_LINUX_TYPES_H
-#include <linux/types.h>
+#ifdef HAVE_LINUX_TYPES_H #include <linux/types.h>
 #endif
 #ifdef HAVE_LINUX_FIEMAP_H
 #include <linux/fiemap.h>
@@ -90,12 +89,14 @@ typedef u32	__be32;
 						struct f2fs_comp_option)
 #define F2FS_IOC_DECOMPRESS_FILE        _IO(F2FS_IOCTL_MAGIC, 23)
 #define F2FS_IOC_COMPRESS_FILE          _IO(F2FS_IOCTL_MAGIC, 24)
+#define F2FS_IOC_GET_GC_STATS       _IOR(F2FS_IOCTL_MAGIC, 25, \
+                        struct f2fs_gc_stats)
+
 
 #ifndef FSCRYPT_POLICY_V1
 #define FSCRYPT_POLICY_V1		0
 #define FSCRYPT_KEY_DESCRIPTOR_SIZE	8
-struct fscrypt_policy_v1 {
-	__u8 version;
+struct fscrypt_policy_v1 { __u8 version;
 	__u8 contents_encryption_mode;
 	__u8 filenames_encryption_mode;
 	__u8 flags;
@@ -214,4 +215,9 @@ struct f2fs_flush_device {
 struct f2fs_comp_option {
 	u8 algorithm;
 	u8 log_cluster_size;
+};
+
+
+struct f2fs_gc_stats {
+    __u64 blocks_migrated;
 };
