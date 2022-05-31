@@ -211,7 +211,7 @@ static int init_mm_info()
 {
     int err = 0;
 
-    mmi.current_secno = get_sb(sit_blkaddr) / (1 << get_sb(log_blocks_per_seg)) / get_sb(segs_per_sec);
+    mmi.current_secno = (get_sb(sit_blkaddr) - get_sb(segment0_blkaddr)) / (1 << get_sb(log_blocks_per_seg)) / get_sb(segs_per_sec);
     mmi.current_wp = get_sb(sit_blkaddr);
     mmi.bat_addrs = calloc(BAT_ENTRY_COUNT(), sizeof(u_int32_t));
     memset(mmi.bat_addrs, 0, BAT_ENTRY_COUNT() * sizeof(u_int32_t));
@@ -219,8 +219,7 @@ static int init_mm_info()
         err = -ENOMEM;
         goto exit;
     }
-
-    mmi.block_information_table = calloc(
+mmi.block_information_table = calloc(
             CEILING(BIT_ENTRY_COUNT(), 1024), sizeof(u_int32_t));
     if (!mmi.block_information_table) {
         err = -ENOMEM;
@@ -510,7 +509,6 @@ static int f2fs_prepare_super_block(void)
     // overprovision meta segments
 
     set_sb(section_count_meta, total_meta_segments / c.segs_per_sec);
-    printf("section_count_meta: %u\n", get_sb(section_count_meta));
 
     set_sb(last_ssa_blkaddr,
             (get_sb(ssa_blkaddr) + get_sb(segment_count_ssa) * c.blks_per_seg) - 1);
@@ -518,8 +516,11 @@ static int f2fs_prepare_super_block(void)
 	total_meta_zones = ZONE_ALIGN(total_meta_segments *
 						c.blks_per_seg);
 
-	set_sb(main_blkaddr, get_sb(segment0_blkaddr) + total_meta_zones *
-				c.segs_per_zone * c.blks_per_seg);
+
+	set_sb(main_blkaddr, get_sb(sit_blkaddr) + (
+				(total_meta_zones) *
+				c.segs_per_zone *
+				c.blks_per_seg));
 
     DBG(1, "\tmain_blkaddr: %u\n", get_sb(main_blkaddr));
 
@@ -557,7 +558,7 @@ static int f2fs_prepare_super_block(void)
 #endif
 
 	total_zones = get_sb(segment_count) / (c.segs_per_zone) -
-							total_meta_zones;
+							total_meta_zones - 2; // account for cp
 
 	set_sb(section_count, total_zones * c.secs_per_zone);
 
@@ -802,8 +803,6 @@ static int f2fs_write_check_point_pack(void)
 	int off;
 	int ret = -1;
 
-    dump_bat();
-
 	cp = calloc(F2FS_BLKSIZE, 1);
 	if (cp == NULL) {
 		MSG(1, "\tError: Calloc failed for f2fs_checkpoint!!!\n");
@@ -840,8 +839,6 @@ static int f2fs_write_check_point_pack(void)
 
     set_cp(cur_meta_secno, mmi.current_secno);
     set_cp(cur_meta_wp, mmi.current_wp);
-
-    printf("cure_meta_secno: %zu\n", get_cp(cur_meta_secno));
 
 	/* 1. cp page 1 of checkpoint pack 1 */
 	srand((c.fake_seed) ? 0 : time(NULL));
@@ -908,7 +905,6 @@ static int f2fs_write_check_point_pack(void)
     set_cp(cp_pack_start_meta_bitmap, get_cp(cp_pack_start_meta_bit)
             + CEILING(BIT_ENTRY_COUNT(), 1024));
 
-    printf("cp_pack_start_meta_bat: %lu\n", get_cp(cp_pack_start_meta_bat));
 
 #if 0 // disabling this, unless absolutely necessary
 	if (get_cp(cp_pack_total_block_count) <=
@@ -927,9 +923,6 @@ static int f2fs_write_check_point_pack(void)
             CEILING(BAT_ENTRY_COUNT(), 1024) +
             CEILING(BIT_ENTRY_COUNT(), 1024));
 
-    printf("cp_pack_start_sum + seg0_blkaddr: %lu\n",
-            get_sb(segment0_blkaddr) + get_cp(cp_pack_start_sum));
-
 	set_cp(valid_node_count, 1 + c.quota_inum + c.lpf_inum);
 	set_cp(valid_inode_count, 1 + c.quota_inum + c.lpf_inum);
 	set_cp(next_free_nid, c.next_free_nid);
@@ -944,7 +937,6 @@ static int f2fs_write_check_point_pack(void)
 	else
 		set_cp(checksum_offset, CP_CHKSUM_OFFSET);
 
-    printf("checksum_offset: %zu\n", get_cp(checksum_offset));
 
 	crc = f2fs_checkpoint_chksum(cp);
 	*((__le32 *)((unsigned char *)cp + get_cp(checksum_offset))) =
@@ -963,7 +955,6 @@ static int f2fs_write_check_point_pack(void)
 
 	DBG(1, "\tWriting main segments, cp at offset %zu\n",
 						cp_seg_blk);
-    printf("cp_seg_blk: %u\n", cp_seg_blk);
 	if (dev_write_block(cp, cp_seg_blk)) {
 		MSG(1, "\tError: While writing the cp to disk!!!\n");
 		goto free_cp_payload;
@@ -1116,8 +1107,6 @@ static int f2fs_write_check_point_pack(void)
     cp_seg_blk++;
 	DBG(1, "\tWriting bat_addrs, at offset %lu\n", cp_seg_blk);
 
-    printf("\nBAT_ENTRY_COUNT: (%u)\n\n", BAT_ENTRY_COUNT());
-
     for (i = 0; i < BAT_ENTRY_COUNT(); i += 1024) {
         if (dev_write_block(mmi.bat_addrs + i, cp_seg_blk++)) {
             MSG(1, "\tError: while writing the mmi.bat_addrs to disk!!!\n");
@@ -1210,7 +1199,6 @@ static int f2fs_write_check_point_pack(void)
 		goto free_cp_payload;
 	}
 
-    printf("cp_seg_blk - total_block_count %zu\n", cp_seg_blk - get_cp(cp_pack_total_block_count));
 
 	/* write NAT bits, if possible */
 	if (flags & CP_NAT_BITS_FLAG) {
@@ -1638,9 +1626,6 @@ static int f2fs_update_nat_root(void)
 		get_sb(main_blkaddr) +
 		c.cur_seg[CURSEG_HOT_NODE] * c.blks_per_seg);
 
-    printf("nat_blk->entries[get_sb(root_ino)].block_addr = (%lu)\n",
-            le32_to_cpu(nat_blk->entries[get_sb(root_ino)].block_addr));
-
 	nat_blk->entries[get_sb(root_ino)].ino = sb->root_ino;
 
 	/* update node nat */
@@ -1668,13 +1653,10 @@ static int f2fs_update_nat_root(void)
 
     // metadata placed adjacent to data
 
-    printf("current_wp: %lu\n", mmi.current_wp);
 
     mmi.bat_addrs[nat_seg_blk_idx / BAT_CHUNK_SIZE] = mmi.current_wp + 1;
     mmi.section_bitmap[0] |= 1;
 
-    printf("nat_seg_blk_idx / BAT_CHUNK_SIZE: %lu\n",
-            nat_seg_blk_idx / BAT_CHUNK_SIZE);
 
 	if (dev_write_block(nat_blk, mmi.current_wp++)) {
 		MSG(1, "\tError: While writing the nat_blk set0 to disk!\n");
@@ -1951,18 +1933,21 @@ exit:
 
 void dump_super(void)
 {
-    printf("segment0_blkaddr: %lu\n", get_sb(segment0_blkaddr));
-    printf("section_count_ckpt: %lu\n", get_sb(segment_count_ckpt) / get_sb(segs_per_sec));
-    printf("sit_blkaddr: %lu\n", get_sb(sit_blkaddr));
-    printf("current-secno: %lu\n", mmi.current_secno);
-    printf("current-wp / blocks_per_seg: %lu\n", mmi.current_wp >> get_sb(log_blocks_per_seg));
-    printf("current-wp: %lu\n", mmi.current_wp);
+    printf("segment0_blkaddr: %u\n", get_sb(segment0_blkaddr));
+    printf("section_count_ckpt: %u\n", get_sb(segment_count_ckpt) / get_sb(segs_per_sec));
+    printf("sit_blkaddr: %u\n", get_sb(sit_blkaddr));
+    printf("current-secno: %u\n", mmi.current_secno);
+    printf("current-wp / blocks_per_seg: %u\n", mmi.current_wp >> get_sb(log_blocks_per_seg));
+    printf("current-wp: %u\n", mmi.current_wp);
+
+    printf("cur_meta_wp: %u\n", get_cp(cur_meta_wp));
+
+    printf("main_blkaddr: %u\n", get_sb(main_blkaddr));
 }
 
 int init_meta()
 {
     int err = 0;
-    size_t cur_blk = 0;
     char *zero_block = NULL;
 
     zero_block = malloc(F2FS_BLKSIZE);
@@ -2000,8 +1985,6 @@ out:
 int f2fs_format_device(void)
 {
 	int err = 0;
-
-    printf("sizeof(struct f2fs_super_block): %u\n", sizeof(struct f2fs_super_block));
 
 	err = f2fs_prepare_super_block();
 	if (err < 0) {
@@ -2043,7 +2026,6 @@ int f2fs_format_device(void)
 		goto exit;
 	}
 #endif
-    dump_bat();
 
 	err = f2fs_create_root_dir();
 	if (err < 0) {
@@ -2064,8 +2046,6 @@ int f2fs_format_device(void)
 		MSG(0, "\tError: Failed to write the super block!!!\n");
 		goto exit;
 	}
-
-    dump_super();
 
 exit:
 	if (err)

@@ -439,8 +439,6 @@ int f2fs_reset_zones(int j)
 	unsigned int i;
 	int ret = -1;
 
-    printf("We can reset zones!\n");
-
 	rep = malloc(F2FS_REPORT_ZONES_BUFSZ);
 	if (!rep) {
 		ERR_MSG("No memory for report zones\n");
