@@ -488,8 +488,7 @@ static int f2fs_prepare_super_block(void)
 
 	set_sb(segment_count_ssa, SEG_ALIGN(blocks_for_ssa));
 
-	total_meta_segments = (get_sb(segment_count_ckpt) +
-		get_sb(segment_count_sit) +
+	total_meta_segments = (get_sb(segment_count_sit) +
 		get_sb(segment_count_nat) +
 		get_sb(segment_count_ssa)) * 2;
 
@@ -506,12 +505,18 @@ static int f2fs_prepare_super_block(void)
         total_meta_segments += (c.segs_per_zone - diff);
     }
 
-    // overprovision meta segments
+
+    // avoid overprovisioning for checkpoint
+    total_meta_segments += get_sb(segment_count_ckpt);
+
 
     set_sb(section_count_meta, total_meta_segments / c.segs_per_sec);
 
     set_sb(last_ssa_blkaddr,
             (get_sb(ssa_blkaddr) + get_sb(segment_count_ssa) * c.blks_per_seg) - 1);
+
+
+    printf("\n\n TOTAL META SEGMENTS: %lu\n\n", total_meta_segments);
 
 	total_meta_zones = ZONE_ALIGN(total_meta_segments *
 						c.blks_per_seg);
@@ -1225,6 +1230,9 @@ static int f2fs_write_check_point_pack(void)
 		}
 	}
 
+	printf("blocks_per_seg: %u\n", 2 << get_sb(log_blocks_per_seg));
+	printf("FREE_SEGMENTS: %lu", get_cp(free_segment_count));
+	
     return 0;
 
 	/* cp page 1 of check point pack 2
