@@ -617,7 +617,8 @@ static int f2fs_prepare_super_block(void)
 	set_sb(meta_ino, 2);
 	set_sb(root_ino, 3);
     set_sb(meta_mapped_ino, 4);
-	c.next_free_nid = 5;
+    set_sb(meta_chunk_ino, 5);
+	c.next_free_nid = 6;
 
 	if (c.feature & cpu_to_le32(F2FS_FEATURE_QUOTA_INO)) {
 		quotatype_bits = QUOTA_USR_BIT | QUOTA_GRP_BIT;
